@@ -90,7 +90,8 @@ jobs:
               'snippet': {
                   'title': title,
                   'description': description,
-                  'categoryId': '22'
+                  'categoryId': '22',
+                  'channelId': 'UCuV97Re7cmBaTTAAdNA-LGA'
               },
               'status': {
                   'privacyStatus': privacy,
