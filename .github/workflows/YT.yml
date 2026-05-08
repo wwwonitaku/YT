@@ -1,0 +1,123 @@
+name: YouTube Re-upload
+
+on:
+  workflow_dispatch:
+    inputs:
+      youtube_url:
+        description: 'URL video YouTube cần tải'
+        required: true
+        type: string
+      video_title:
+        description: 'Tiêu đề video khi upload (để trống = giữ nguyên tiêu đề gốc)'
+        required: false
+        type: string
+      video_description:
+        description: 'Mô tả video'
+        required: false
+        default: 'Video được re-upload tự động.'
+        type: string
+      privacy:
+        description: 'Quyền riêng tư'
+        required: true
+        default: 'private'
+        type: choice
+        options:
+          - private
+          - unlisted
+          - public
+
+jobs:
+  reupload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
+
+      - name: Download video from YouTube
+        run: |
+          yt-dlp \
+            --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
+            --merge-output-format mp4 \
+            --write-info-json \
+            --output "video.%(ext)s" \
+            "${{ github.event.inputs.youtube_url }}"
+
+      - name: Upload lên YouTube channel
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          VIDEO_TITLE: ${{ github.event.inputs.video_title }}
+          VIDEO_DESCRIPTION: ${{ github.event.inputs.video_description }}
+          VIDEO_PRIVACY: ${{ github.event.inputs.privacy }}
+        run: |
+          python3 - <<'EOF'
+          import os, json
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          # Xác thực OAuth
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
+              client_id=os.environ['YOUTUBE_CLIENT_ID'],
+              client_secret=os.environ['YOUTUBE_CLIENT_SECRET'],
+              token_uri='https://oauth2.googleapis.com/token'
+          )
+          youtube = build('youtube', 'v3', credentials=creds)
+
+          # Lấy tiêu đề từ input hoặc info.json
+          title = os.environ.get('VIDEO_TITLE', '').strip()
+          if not title and os.path.exists('video.info.json'):
+              with open('video.info.json', 'r', encoding='utf-8') as f:
+                  title = json.load(f).get('title', 'Untitled Video')
+          title = (title or 'Untitled Video')[:100]
+
+          description = os.environ.get('VIDEO_DESCRIPTION', '')
+          privacy     = os.environ.get('VIDEO_PRIVACY', 'private')
+
+          print(f"📤 Đang upload: {title}")
+
+          body = {
+              'snippet': {
+                  'title': title,
+                  'description': description,
+                  'categoryId': '22'
+              },
+              'status': {
+                  'privacyStatus': privacy,
+                  'selfDeclaredMadeForKids': False
+              }
+          }
+
+          media = MediaFileUpload(
+              'video.mp4',
+              mimetype='video/mp4',
+              resumable=True,
+              chunksize=10 * 1024 * 1024  # 10 MB/chunk
+          )
+
+          request = youtube.videos().insert(
+              part='snippet,status',
+              body=body,
+              media_body=media
+          )
+
+          response = None
+          while response is None:
+              status, response = request.next_chunk()
+              if status:
+                  print(f"  Tiến độ: {int(status.progress() * 100)}%")
+
+          video_id = response['id']
+          print(f"✅ Upload thành công! Video ID: {video_id}")
+          print(f"🔗 https://www.youtube.com/watch?v={video_id}")
+          EOF
