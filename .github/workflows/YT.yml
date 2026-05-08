@@ -40,9 +40,13 @@ jobs:
       - name: Install dependencies
         run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
+      - name: Write cookies file
+        run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+
       - name: Download video from YouTube
         run: |
           yt-dlp \
+            --cookies cookies.txt \
             --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
             --merge-output-format mp4 \
             --write-info-json \
@@ -64,7 +68,6 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          # Xác thực OAuth
           creds = Credentials(
               token=None,
               refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
@@ -74,7 +77,6 @@ jobs:
           )
           youtube = build('youtube', 'v3', credentials=creds)
 
-          # Lấy tiêu đề từ input hoặc info.json
           title = os.environ.get('VIDEO_TITLE', '').strip()
           if not title and os.path.exists('video.info.json'):
               with open('video.info.json', 'r', encoding='utf-8') as f:
@@ -90,8 +92,7 @@ jobs:
               'snippet': {
                   'title': title,
                   'description': description,
-                  'categoryId': '22',
-                  'channelId': 'UCuV97Re7cmBaTTAAdNA-LGA'
+                  'categoryId': '22'
               },
               'status': {
                   'privacyStatus': privacy,
@@ -103,7 +104,7 @@ jobs:
               'video.mp4',
               mimetype='video/mp4',
               resumable=True,
-              chunksize=10 * 1024 * 1024  # 10 MB/chunk
+              chunksize=10 * 1024 * 1024
           )
 
           request = youtube.videos().insert(
