@@ -70,10 +70,17 @@ jobs:
           VIDEO_PRIVACY: ${{ github.event.inputs.privacy }}
         run: |
           python3 - <<'EOF'
-          import os, json
+          import os, json, glob
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
+
+          # Tìm file video bất kể tên gì
+          video_files = glob.glob('*.mp4') + glob.glob('*.mkv') + glob.glob('*.webm')
+          if not video_files:
+              raise FileNotFoundError("Không tìm thấy file video!")
+          video_file = video_files[0]
+          print(f"📁 File video: {video_file}")
 
           creds = Credentials(
               token=None,
@@ -88,6 +95,12 @@ jobs:
           if not title and os.path.exists('video.info.json'):
               with open('video.info.json', 'r', encoding='utf-8') as f:
                   title = json.load(f).get('title', 'Untitled Video')
+          if not title:
+              # Thử tìm file info.json bất kể tên
+              info_files = glob.glob('*.info.json')
+              if info_files:
+                  with open(info_files[0], 'r', encoding='utf-8') as f:
+                      title = json.load(f).get('title', 'Untitled Video')
           title = (title or 'Untitled Video')[:100]
 
           description = os.environ.get('VIDEO_DESCRIPTION', '')
@@ -108,7 +121,7 @@ jobs:
           }
 
           media = MediaFileUpload(
-              'video.mp4',
+              video_file,
               mimetype='video/mp4',
               resumable=True,
               chunksize=10 * 1024 * 1024
