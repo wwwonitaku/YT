@@ -41,11 +41,53 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
+        run: pip install yt-dlp requests google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Download video from YouTube
+      - name: Generate cookie from OAuth & Download
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
         run: |
+          # Bước 1: Lấy access_token từ refresh_token, tạo cookies.txt
+          python3 - <<'PYEOF'
+          import os, requests
+
+          r = requests.post("https://oauth2.googleapis.com/token", data={
+              "client_id":     os.environ["YOUTUBE_CLIENT_ID"],
+              "client_secret": os.environ["YOUTUBE_CLIENT_SECRET"],
+              "refresh_token": os.environ["YOUTUBE_REFRESH_TOKEN"],
+              "grant_type":    "refresh_token",
+          })
+          r.raise_for_status()
+          data = r.json()
+
+          if "access_token" not in data:
+              print(f"❌ Không lấy được access_token: {data}")
+              exit(1)
+
+          token = data["access_token"]
+          print("✅ Lấy access_token thành công")
+
+          # Ghi cookie Netscape format cho yt-dlp
+          cookie_content = "\n".join([
+              "# Netscape HTTP Cookie File",
+              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\tSAPISID\t" + token,
+              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\t__Secure-1PAPISID\t" + token,
+              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\t__Secure-3PAPISID\t" + token,
+              ".youtube.com\tTRUE\t/\tFALSE\t2999999999\tSID\t" + token,
+              ".youtube.com\tTRUE\t/\tFALSE\t2999999999\tHSID\t" + token,
+          ])
+          with open("cookies.txt", "w") as f:
+              f.write(cookie_content + "\n")
+
+          print("✅ cookies.txt đã được tạo")
+          PYEOF
+
+          # Bước 2: Download video dùng cookie vừa tạo
           yt-dlp \
+            --cookies cookies.txt \
             --extractor-args "youtube:player_client=android" \
             --format "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" \
             --merge-output-format mp4 \
@@ -54,11 +96,15 @@ jobs:
             --output "video.%(ext)s" \
             --retries 5 \
             --retry-sleep linear=2::3 \
-            "${{ github.event.inputs.youtube_url }}"
+            "$YOUTUBE_URL"
 
       - name: Verify video có audio
         run: |
           VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
+          if [ -z "$VIDEO" ]; then
+            echo "❌ Không tìm thấy file video!"
+            exit 1
+          fi
           echo "📁 File: $VIDEO"
           echo "📊 Thông tin streams:"
           ffprobe -v error -show_streams -select_streams a -of default=nw=1 "$VIDEO" || true
