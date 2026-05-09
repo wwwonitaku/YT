@@ -3,18 +3,17 @@ name: YouTube Re-upload
 on:
   workflow_dispatch:
     inputs:
-      youtube_url:
-        description: 'URL video YouTube cần tải'
+      video_id:
+        description: 'ID video YouTube (vd: dQw4w9WgXcQ)'
+        required: true
+        type: string
+      tmdb:
+        description: 'TMDB ID (dùng làm description YouTube + tên file HLS + branch Cloudflare)'
         required: true
         type: string
       video_title:
         description: 'Tiêu đề video khi upload (để trống = giữ nguyên tiêu đề gốc)'
         required: false
-        type: string
-      video_description:
-        description: 'Mô tả video'
-        required: false
-        default: 'Video được re-upload tự động.'
         type: string
       privacy:
         description: 'Quyền riêng tư'
@@ -32,6 +31,11 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      - name: Install Deno
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
       - name: Install ffmpeg
         run: sudo apt-get install -y ffmpeg
 
@@ -41,70 +45,27 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install yt-dlp requests google-api-python-client google-auth-httplib2 google-auth-oauthlib
+        run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Generate cookie from OAuth & Download
-        env:
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          YOUTUBE_URL: ${{ github.event.inputs.youtube_url }}
+      - name: Write cookies file
+        run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+
+      - name: Download video from YouTube
         run: |
-          # Bước 1: Lấy access_token từ refresh_token, tạo cookies.txt
-          python3 - <<'PYEOF'
-          import os, requests
-
-          r = requests.post("https://oauth2.googleapis.com/token", data={
-              "client_id":     os.environ["YOUTUBE_CLIENT_ID"],
-              "client_secret": os.environ["YOUTUBE_CLIENT_SECRET"],
-              "refresh_token": os.environ["YOUTUBE_REFRESH_TOKEN"],
-              "grant_type":    "refresh_token",
-          })
-          r.raise_for_status()
-          data = r.json()
-
-          if "access_token" not in data:
-              print(f"❌ Không lấy được access_token: {data}")
-              exit(1)
-
-          token = data["access_token"]
-          print("✅ Lấy access_token thành công")
-
-          # Ghi cookie Netscape format cho yt-dlp
-          cookie_content = "\n".join([
-              "# Netscape HTTP Cookie File",
-              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\tSAPISID\t" + token,
-              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\t__Secure-1PAPISID\t" + token,
-              ".youtube.com\tTRUE\t/\tTRUE\t2999999999\t__Secure-3PAPISID\t" + token,
-              ".youtube.com\tTRUE\t/\tFALSE\t2999999999\tSID\t" + token,
-              ".youtube.com\tTRUE\t/\tFALSE\t2999999999\tHSID\t" + token,
-          ])
-          with open("cookies.txt", "w") as f:
-              f.write(cookie_content + "\n")
-
-          print("✅ cookies.txt đã được tạo")
-          PYEOF
-
-          # Bước 2: Download video dùng cookie vừa tạo
           yt-dlp \
             --cookies cookies.txt \
-            --extractor-args "youtube:player_client=android" \
+            --js-runtimes deno \
+            --remote-components ejs:github \
             --format "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" \
             --merge-output-format mp4 \
             --write-info-json \
             --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
             --output "video.%(ext)s" \
-            --retries 5 \
-            --retry-sleep linear=2::3 \
-            "$YOUTUBE_URL"
+            "https://www.youtube.com/watch?v=${{ github.event.inputs.video_id }}"
 
       - name: Verify video có audio
         run: |
           VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
-          if [ -z "$VIDEO" ]; then
-            echo "❌ Không tìm thấy file video!"
-            exit 1
-          fi
           echo "📁 File: $VIDEO"
           echo "📊 Thông tin streams:"
           ffprobe -v error -show_streams -select_streams a -of default=nw=1 "$VIDEO" || true
@@ -122,7 +83,7 @@ jobs:
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
           VIDEO_TITLE: ${{ github.event.inputs.video_title }}
-          VIDEO_DESCRIPTION: ${{ github.event.inputs.video_description }}
+          VIDEO_TMDB: ${{ github.event.inputs.tmdb }}
           VIDEO_PRIVACY: ${{ github.event.inputs.privacy }}
         run: |
           python3 - <<'EOF'
@@ -157,16 +118,18 @@ jobs:
                       title = json.load(f).get('title', 'Untitled Video')
           title = (title or 'Untitled Video')[:100]
 
-          description = os.environ.get('VIDEO_DESCRIPTION', '')
-          privacy     = os.environ.get('VIDEO_PRIVACY', 'private')
+          # Dùng TMDB ID làm description
+          tmdb    = os.environ.get('VIDEO_TMDB', '')
+          privacy = os.environ.get('VIDEO_PRIVACY', 'private')
 
           print(f"📤 Đang upload: {title}")
+          print(f"📝 Description (TMDB): {tmdb}")
           print(f"🔒 Privacy: {privacy}")
 
           body = {
               'snippet': {
                   'title': title,
-                  'description': description,
+                  'description': tmdb,
                   'categoryId': '22'
               },
               'status': {
@@ -174,14 +137,12 @@ jobs:
                   'selfDeclaredMadeForKids': False
               }
           }
-
           media = MediaFileUpload(
               video_file,
               mimetype='video/mp4',
               resumable=True,
               chunksize=10 * 1024 * 1024
           )
-
           request = youtube.videos().insert(
               part='snippet,status',
               body=body,
@@ -208,6 +169,10 @@ jobs:
           print(f"✅ Upload thành công! Video ID: {video_id}")
           print(f"🔗 https://www.youtube.com/watch?v={video_id}")
 
+          # Ghi video_id ra file để step sau dùng
+          with open('uploaded_video_id.txt', 'w') as f:
+              f.write(video_id)
+
           # Kiểm tra trạng thái xử lý
           print("\n⏳ Đang chờ YouTube xử lý...")
           for i in range(6):
@@ -216,18 +181,14 @@ jobs:
                   part="status,processingDetails",
                   id=video_id
               ).execute()
-
               if not status_resp.get("items"):
                   print(f"  [{i+1}] ⚠️ Không tìm thấy video")
                   continue
-
               item = status_resp["items"][0]
               upload_status     = item["status"].get("uploadStatus", "unknown")
               processing        = item.get("processingDetails", {})
               processing_status = processing.get("processingStatus", "unknown")
-
               print(f"  [{i+1}] uploadStatus={upload_status} | processingStatus={processing_status}")
-
               if upload_status == "processed":
                   print("🎉 Video đã xử lý xong và sẵn sàng!")
                   break
@@ -238,3 +199,43 @@ jobs:
           else:
               print("⏰ Hết thời gian kiểm tra — video vẫn đang xử lý trên YouTube (bình thường với video dài)")
           EOF
+
+      - name: Convert to HLS for Cloudflare Pages
+        run: |
+          mkdir -p output
+          VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
+          echo "🎬 Converting: $VIDEO → HLS"
+
+          ffmpeg -i "$VIDEO" -c copy -f hls \
+            -hls_time 5 \
+            -hls_list_size 0 \
+            -start_number 10001 \
+            -hls_playlist_type vod \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.tmdb }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.tmdb }}-index%d.png" \
+            "output/${{ github.event.inputs.tmdb }}.m3u8"
+
+          echo "✅ HLS segments:"
+          ls -lh output/
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy_cf
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          projectName: x0-vicdn-cc
+          directory: ./output
+          branch: ${{ github.event.inputs.tmdb }}
+
+      - name: Summary
+        run: |
+          YT_ID=$(cat uploaded_video_id.txt 2>/dev/null || echo "unknown")
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ HOÀN TẤT!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📺 YouTube  : https://www.youtube.com/watch?v=${YT_ID}"
+          echo "☁️  Cloudflare: ${{ steps.deploy_cf.outputs.url }}/${{ github.event.inputs.tmdb }}.m3u8"
+          echo "🎞️  TMDB ID  : ${{ github.event.inputs.tmdb }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
