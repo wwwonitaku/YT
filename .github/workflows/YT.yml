@@ -32,11 +32,6 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Install Deno
-        run: |
-          curl -fsSL https://deno.land/install.sh | sh
-          echo "$HOME/.deno/bin" >> $GITHUB_PATH
-
       - name: Install ffmpeg
         run: sudo apt-get install -y ffmpeg
 
@@ -48,20 +43,17 @@ jobs:
       - name: Install dependencies
         run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Write cookies file
-        run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
-
       - name: Download video from YouTube
         run: |
           yt-dlp \
-            --cookies cookies.txt \
-            --js-runtimes deno \
-            --remote-components ejs:github \
+            --extractor-args "youtube:player_client=android" \
             --format "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" \
             --merge-output-format mp4 \
             --write-info-json \
             --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
             --output "video.%(ext)s" \
+            --retries 5 \
+            --retry-sleep linear=2::3 \
             "${{ github.event.inputs.youtube_url }}"
 
       - name: Verify video có audio
@@ -184,8 +176,8 @@ jobs:
                   continue
 
               item = status_resp["items"][0]
-              upload_status    = item["status"].get("uploadStatus", "unknown")
-              processing       = item.get("processingDetails", {})
+              upload_status     = item["status"].get("uploadStatus", "unknown")
+              processing        = item.get("processingDetails", {})
               processing_status = processing.get("processingStatus", "unknown")
 
               print(f"  [{i+1}] uploadStatus={upload_status} | processingStatus={processing_status}")
