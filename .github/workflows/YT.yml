@@ -56,10 +56,15 @@ jobs:
             --cookies cookies.txt \
             --js-runtimes deno \
             --remote-components ejs:github \
-            --format "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" \
+            --extractor-args "youtube:player_client=ios,web" \
+            --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best" \
             --merge-output-format mp4 \
             --write-info-json \
             --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
+            --retries 15 \
+            --fragment-retries 15 \
+            --retry-sleep fragment:5 \
+            --concurrent-fragments 4 \
             --output "video.%(ext)s" \
             "https://www.youtube.com/watch?v=${{ github.event.inputs.video_id }}"
 
