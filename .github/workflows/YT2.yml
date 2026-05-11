@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'URL video YouTube cần tải'
+        description: 'ID'
         required: true
         type: string
       video_title:
@@ -61,7 +61,7 @@ jobs:
             --write-info-json \
             --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
             --output "video.%(ext)s" \
-            "${{ github.event.inputs.youtube_url }}"
+            "https://www.youtube.com/watch?v=${{ github.event.inputs.youtube_url }}"
       - name: Verify video có audio
         run: |
           VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
