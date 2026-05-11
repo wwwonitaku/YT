@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'ID'
+        description: 'ID video YouTube'
         required: true
         type: string
       video_title:
@@ -29,13 +29,14 @@ on:
 jobs:
   reupload:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
 
     steps:
       - name: Install Deno
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
       - name: Install ffmpeg
         run: sudo apt-get install -y ffmpeg
 
@@ -50,31 +51,43 @@ jobs:
       - name: Write cookies file
         run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
 
-      - name: Download video from YouTube
+      - name: Download video từ YouTube (chất lượng cao nhất)
         run: |
           yt-dlp \
             --cookies cookies.txt \
             --js-runtimes deno \
             --remote-components ejs:github \
-            --format "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo+bestaudio/best" \
-            --merge-output-format mp4 \
+            --format "bestvideo+bestaudio/best" \
+            --merge-output-format mkv \
+            --postprocessor-args "ffmpeg:-c:v copy -c:a copy" \
             --write-info-json \
-            --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
             --output "video.%(ext)s" \
             "https://www.youtube.com/watch?v=${{ github.event.inputs.youtube_url }}"
-      - name: Verify video có audio
+
+      - name: Kiểm tra video và audio
         run: |
-          VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
-          echo "📁 File: $VIDEO"
-          echo "📊 Thông tin streams:"
-          ffprobe -v error -show_streams -select_streams a -of default=nw=1 "$VIDEO" || true
+          VIDEO=$(ls video.mkv video.mp4 video.webm 2>/dev/null | head -1)
+          echo "📁 File tải về: $VIDEO"
+          echo "📊 Thông tin đầy đủ:"
+          ffprobe -v error -show_streams -of default=nw=1 "$VIDEO" || true
+
           AUDIO=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=nw=1 "$VIDEO" 2>&1)
+          VIDEO_CODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1 "$VIDEO" 2>&1)
+          SIZE=$(du -sh "$VIDEO" | cut -f1)
+
+          echo "🎬 Codec video: $VIDEO_CODEC"
+          echo "🔊 Codec audio: $AUDIO"
+          echo "💾 Dung lượng: $SIZE"
+
           if [ -z "$AUDIO" ]; then
             echo "❌ KHÔNG có audio stream! Dừng lại."
             exit 1
           else
-            echo "✅ Có audio: $AUDIO"
+            echo "✅ OK — video và audio đều có"
           fi
+
+          echo "VIDEO_FILE=$VIDEO" >> $GITHUB_ENV
+
       - name: Upload lên YouTube channel
         env:
           YOUTUBE_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
@@ -85,16 +98,23 @@ jobs:
           VIDEO_PRIVACY: ${{ github.event.inputs.privacy }}
         run: |
           python3 - <<'EOF'
-          import os, json, glob, time
+          import os, json, glob, time, mimetypes
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
-          # Tìm file video
-          video_files = glob.glob('*.mp4') + glob.glob('*.mkv') + glob.glob('*.webm')
-          if not video_files:
+
+          # Tìm file video (ưu tiên mkv > mp4 > webm)
+          video_file = None
+          for ext in ['*.mkv', '*.mp4', '*.webm']:
+              files = glob.glob(ext)
+              if files:
+                  video_file = files[0]
+                  break
+          if not video_file:
               raise FileNotFoundError("Không tìm thấy file video!")
-          video_file = video_files[0]
           print(f"📁 File video: {video_file}")
+          print(f"💾 Dung lượng: {os.path.getsize(video_file) / 1024 / 1024:.1f} MB")
+
           # Khởi tạo credentials
           creds = Credentials(
               token=None,
@@ -104,6 +124,7 @@ jobs:
               token_uri='https://oauth2.googleapis.com/token'
           )
           youtube = build('youtube', 'v3', credentials=creds)
+
           # Lấy tiêu đề
           title = os.environ.get('VIDEO_TITLE', '').strip()
           if not title:
@@ -114,8 +135,20 @@ jobs:
           title = (title or 'Untitled Video')[:100]
           description = os.environ.get('VIDEO_DESCRIPTION', '')
           privacy     = os.environ.get('VIDEO_PRIVACY', 'private')
+
           print(f"📤 Đang upload: {title}")
           print(f"🔒 Privacy: {privacy}")
+
+          # Xác định mimetype đúng theo đuôi file
+          mime_map = {
+              '.mkv': 'video/x-matroska',
+              '.mp4': 'video/mp4',
+              '.webm': 'video/webm',
+          }
+          ext = os.path.splitext(video_file)[1].lower()
+          mime = mime_map.get(ext, 'video/mp4')
+          print(f"📦 MIME type: {mime}")
+
           body = {
               'snippet': {
                   'title': title,
@@ -129,7 +162,7 @@ jobs:
           }
           media = MediaFileUpload(
               video_file,
-              mimetype='video/mp4',
+              mimetype=mime,
               resumable=True,
               chunksize=10 * 1024 * 1024
           )
@@ -138,14 +171,15 @@ jobs:
               body=body,
               media_body=media
           )
-          # Upload với retry
+
+          # Upload với retry tự động
           response = None
           retry = 0
           while response is None:
               try:
                   status, response = request.next_chunk()
                   if status:
-                      print(f"  Tiến độ: {int(status.progress() * 100)}%")
+                      print(f"  ⬆️  Tiến độ: {int(status.progress() * 100)}%")
                   retry = 0
               except Exception as e:
                   retry += 1
@@ -153,9 +187,11 @@ jobs:
                       raise
                   print(f"  ⚠️ Lỗi tạm thời (lần {retry}): {e} — thử lại sau 10s...")
                   time.sleep(10)
+
           video_id = response['id']
-          print(f"✅ Upload thành công! Video ID: {video_id}")
+          print(f"\n✅ Upload thành công! Video ID: {video_id}")
           print(f"🔗 https://www.youtube.com/watch?v={video_id}")
+
           # Kiểm tra trạng thái xử lý
           print("\n⏳ Đang chờ YouTube xử lý...")
           for i in range(6):
@@ -168,9 +204,8 @@ jobs:
                   print(f"  [{i+1}] ⚠️ Không tìm thấy video")
                   continue
               item = status_resp["items"][0]
-              upload_status    = item["status"].get("uploadStatus", "unknown")
-              processing       = item.get("processingDetails", {})
-              processing_status = processing.get("processingStatus", "unknown")
+              upload_status     = item["status"].get("uploadStatus", "unknown")
+              processing_status = item.get("processingDetails", {}).get("processingStatus", "unknown")
               print(f"  [{i+1}] uploadStatus={upload_status} | processingStatus={processing_status}")
               if upload_status == "processed":
                   print("🎉 Video đã xử lý xong và sẵn sàng!")
