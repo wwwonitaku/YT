@@ -1,4 +1,4 @@
-name: YouTube Re-upload
+name: YT2
 
 on:
   workflow_dispatch:
