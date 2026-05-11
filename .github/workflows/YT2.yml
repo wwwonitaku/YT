@@ -7,10 +7,6 @@ on:
         description: 'ID'
         required: true
         type: string
-      video_title:
-        description: 'Title'
-        required: false
-        type: string
       tmdb:
         description: 'TMDB'
         required: true
