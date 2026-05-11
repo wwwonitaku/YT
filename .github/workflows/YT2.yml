@@ -4,17 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: 'ID video YouTube'
+        description: 'ID'
         required: true
         type: string
       video_title:
-        description: 'Tiêu đề video khi upload (để trống = giữ nguyên tiêu đề gốc)'
+        description: 'Title'
         required: false
         type: string
-      video_description:
-        description: 'Mô tả video'
-        required: false
-        default: 'Full Anime Review Channel'
+      tmdb:
+        description: 'TMDB'
+        required: true
         type: string
       privacy:
         description: 'Quyền riêng tư'
@@ -94,7 +93,6 @@ jobs:
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           VIDEO_TITLE: ${{ github.event.inputs.video_title }}
-          VIDEO_DESCRIPTION: ${{ github.event.inputs.video_description }}
           VIDEO_PRIVACY: ${{ github.event.inputs.privacy }}
         run: |
           python3 - <<'EOF'
@@ -133,8 +131,7 @@ jobs:
                   with open(info_files[0], 'r', encoding='utf-8') as f:
                       title = json.load(f).get('title', 'Untitled Video')
           title = (title or 'Untitled Video')[:100]
-          description = os.environ.get('VIDEO_DESCRIPTION', '')
-          privacy     = os.environ.get('VIDEO_PRIVACY', 'private')
+          privacy = os.environ.get('VIDEO_PRIVACY', 'private')
 
           print(f"📤 Đang upload: {title}")
           print(f"🔒 Privacy: {privacy}")
@@ -152,7 +149,7 @@ jobs:
           body = {
               'snippet': {
                   'title': title,
-                  'description': description,
+                  'description': '',
                   'categoryId': '22'
               },
               'status': {
@@ -192,6 +189,10 @@ jobs:
           print(f"\n✅ Upload thành công! Video ID: {video_id}")
           print(f"🔗 https://www.youtube.com/watch?v={video_id}")
 
+          # Lưu video_id ra file để các step sau dùng
+          with open('uploaded_video_id.txt', 'w') as f:
+              f.write(video_id)
+
           # Kiểm tra trạng thái xử lý
           print("\n⏳ Đang chờ YouTube xử lý...")
           for i in range(6):
@@ -217,3 +218,41 @@ jobs:
           else:
               print("⏰ Hết thời gian kiểm tra — video vẫn đang xử lý trên YouTube (bình thường với video dài)")
           EOF
+
+      - name: Convert to HLS for Cloudflare Pages
+        run: |
+          mkdir -p output
+          VIDEO=${{ env.VIDEO_FILE }}
+          echo "🎬 Converting: $VIDEO → HLS"
+          ffmpeg -i "$VIDEO" -c copy -f hls \
+            -hls_time 5 \
+            -hls_list_size 0 \
+            -start_number 10001 \
+            -hls_playlist_type vod \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.tmdb }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.tmdb }}-index%d.png" \
+            "output/${{ github.event.inputs.tmdb }}.m3u8"
+          echo "✅ HLS segments:"
+          ls -lh output/
+
+      - name: Deploy to Cloudflare Pages
+        id: deploy_cf
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          accountId: ${{ secrets.CF_ACCOUNT_ID }}
+          projectName: x0-vicdn-cc
+          directory: ./output
+          branch: ${{ github.event.inputs.tmdb }}
+
+      - name: Summary
+        run: |
+          YT_ID=$(cat uploaded_video_id.txt 2>/dev/null || echo "unknown")
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "✅ HOÀN TẤT!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📺 YouTube  : https://www.youtube.com/watch?v=${YT_ID}"
+          echo "☁️  Cloudflare: ${{ steps.deploy_cf.outputs.url }}/${{ github.event.inputs.tmdb }}.m3u8"
+          echo "🎞️  TMDB ID  : ${{ github.event.inputs.tmdb }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
