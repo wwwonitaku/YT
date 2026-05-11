@@ -14,7 +14,7 @@ on:
       video_description:
         description: 'Mô tả video'
         required: false
-        default: 'Video được re-upload tự động.'
+        default: 'Full Anime Review Channel'
         type: string
       privacy:
         description: 'Quyền riêng tư'
