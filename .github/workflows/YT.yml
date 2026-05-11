@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       video_id:
-        description: 'ID video YouTube (vd: dQw4w9WgXcQ)'
+        description: 'ID'
         required: true
         type: string
       tmdb:
-        description: 'TMDB ID (dùng làm description YouTube + tên file HLS + branch Cloudflare)'
+        description: 'TMDB'
         required: true
         type: string
       video_title:
-        description: 'Tiêu đề video khi upload (để trống = giữ nguyên tiêu đề gốc)'
+        description: 'Title'
         required: false
         type: string
       privacy:
@@ -50,37 +50,42 @@ jobs:
       - name: Write cookies file
         run: echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
 
-      - name: Download video from YouTube
+      - name: Download video từ YouTube (chất lượng cao nhất)
         run: |
           yt-dlp \
             --cookies cookies.txt \
             --js-runtimes deno \
             --remote-components ejs:github \
-            --extractor-args "youtube:player_client=tv_embedded,web" \
-            --format "bestvideo[vcodec^=avc1][height<=1080]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best" \
-            --merge-output-format mp4 \
+            --format "bestvideo+bestaudio/best" \
+            --merge-output-format mkv \
+            --postprocessor-args "ffmpeg:-c:v copy -c:a copy" \
             --write-info-json \
-            --postprocessor-args "ffmpeg:-c:v copy -c:a aac" \
-            --retries 15 \
-            --fragment-retries 15 \
-            --retry-sleep fragment:5 \
-            --concurrent-fragments 4 \
             --output "video.%(ext)s" \
-            "https://www.youtube.com/watch?v=${{ github.event.inputs.video_id }}"
+            "https://www.youtube.com/watch?v=${{ github.event.inputs.youtube_url }}"
 
-      - name: Verify video có audio
+      - name: Kiểm tra video và audio
         run: |
-          VIDEO=$(ls *.mp4 *.mkv *.webm 2>/dev/null | head -1)
-          echo "📁 File: $VIDEO"
-          echo "📊 Thông tin streams:"
-          ffprobe -v error -show_streams -select_streams a -of default=nw=1 "$VIDEO" || true
+          VIDEO=$(ls video.mkv video.mp4 video.webm 2>/dev/null | head -1)
+          echo "📁 File tải về: $VIDEO"
+          echo "📊 Thông tin đầy đủ:"
+          ffprobe -v error -show_streams -of default=nw=1 "$VIDEO" || true
+
           AUDIO=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name -of default=nw=1 "$VIDEO" 2>&1)
+          VIDEO_CODEC=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1 "$VIDEO" 2>&1)
+          SIZE=$(du -sh "$VIDEO" | cut -f1)
+
+          echo "🎬 Codec video: $VIDEO_CODEC"
+          echo "🔊 Codec audio: $AUDIO"
+          echo "💾 Dung lượng: $SIZE"
+
           if [ -z "$AUDIO" ]; then
             echo "❌ KHÔNG có audio stream! Dừng lại."
             exit 1
           else
-            echo "✅ Có audio: $AUDIO"
+            echo "✅ OK — video và audio đều có"
           fi
+
+          echo "VIDEO_FILE=$VIDEO" >> $GITHUB_ENV
 
       - name: Upload lên YouTube channel
         env:
@@ -97,12 +102,17 @@ jobs:
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
 
-          # Tìm file video
-          video_files = glob.glob('*.mp4') + glob.glob('*.mkv') + glob.glob('*.webm')
-          if not video_files:
+          # Tìm file video (ưu tiên mkv > mp4 > webm)
+          video_file = None
+          for ext in ['*.mkv', '*.mp4', '*.webm']:
+              files = glob.glob(ext)
+              if files:
+                  video_file = files[0]
+                  break
+          if not video_file:
               raise FileNotFoundError("Không tìm thấy file video!")
-          video_file = video_files[0]
           print(f"📁 File video: {video_file}")
+          print(f"💾 Dung lượng: {os.path.getsize(video_file) / 1024 / 1024:.1f} MB")
 
           # Khởi tạo credentials
           creds = Credentials(
