@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       channel_url:
-        description: 'Link kênh YouTube (VD: https://www.youtube.com/@TenKenh hoặc https://www.youtube.com/channel/UCxxxxx)'
+        description: 'Link kênh YouTube'
         required: true
         type: string
       privacy:
-        description: 'Quyền riêng tư cho video upload'
+        description: 'Quyền riêng tư'
         required: true
         default: 'private'
         type: choice
@@ -33,13 +33,13 @@ on:
 jobs:
   clone-channel:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 tiếng
+    timeout-minutes: 360
 
     steps:
       # ────────────────────────────────────────────────────────────
-      # 1. CÀI TOOLS
+      # 1. CÀI TOOLS (giống hệt code gốc)
       # ────────────────────────────────────────────────────────────
-      - name: Checkout repo (để dùng cache)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Install Deno
@@ -55,7 +55,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: pip install yt-dlp google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
       - name: Write cookies file
@@ -69,7 +69,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: uploaded_ids.txt
-          key: uploaded-ids-${{ github.event.inputs.channel_url }}
+          key: uploaded-ids-${{ github.run_id }}
           restore-keys: |
             uploaded-ids-
 
@@ -106,7 +106,6 @@ jobs:
 
           TOTAL=$(wc -l < all_video_ids.txt)
           echo "✅ Tổng số video tìm thấy: $TOTAL"
-          echo "TOTAL_VIDEOS=$TOTAL" >> $GITHUB_ENV
 
           if [ "$TOTAL" -eq 0 ]; then
             echo "❌ Không tìm thấy video nào. Kiểm tra lại link kênh."
@@ -133,20 +132,13 @@ jobs:
           with open('pending_ids.txt', 'w') as f:
               f.write('\n'.join(pending))
 
-          print(f"📊 Tổng video: {len(all_ids)}")
-          print(f"✅ Đã upload:  {len(uploaded)}")
-          print(f"⏳ Cần upload: {len(pending)}")
+          print(f"📊 Tổng video:  {len(all_ids)}")
+          print(f"✅ Đã upload:   {len(uploaded)}")
+          print(f"⏳ Cần upload:  {len(pending)}")
           EOF
 
-          PENDING=$(wc -l < pending_ids.txt)
-          echo "PENDING_VIDEOS=$PENDING" >> $GITHUB_ENV
-
-          if [ "$PENDING" -eq 0 ]; then
-            echo "🎉 Tất cả video đã được upload rồi! Không có gì để làm."
-          fi
-
       # ────────────────────────────────────────────────────────────
-      # 5. VÒNG LẶP: TẢI → UPLOAD → XÓA → LẶP LẠI
+      # 5. VÒNG LẶP: TẢI → KIỂM TRA → UPLOAD → XÓA → LẶP LẠI
       # ────────────────────────────────────────────────────────────
       - name: Tải và upload lần lượt từng video
         env:
@@ -157,7 +149,6 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import os, json, glob, time, subprocess, sys
-
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
           from googleapiclient.http import MediaFileUpload
@@ -185,7 +176,6 @@ jobs:
           privacy = os.environ.get('VIDEO_PRIVACY', 'private')
 
           def cleanup_video():
-              """Xóa các file video tạm sau khi upload xong"""
               for pattern in ['video.*', '*.info.json', '*.webp', '*.jpg', '*.png']:
                   for f in glob.glob(pattern):
                       try:
@@ -193,43 +183,104 @@ jobs:
                       except:
                           pass
 
-          def download_video(video_id):
-              """Tải video từ YouTube, trả về True nếu thành công"""
-              url = f"https://www.youtube.com/watch?v={video_id}"
-              cmd = [
+          success_count = 0
+          fail_count = 0
+
+          for idx, video_id in enumerate(pending, 1):
+              print(f"\n{'='*60}")
+              print(f"📹 [{idx}/{total}] Video ID: {video_id}")
+              print(f"{'='*60}")
+
+              cleanup_video()
+
+              # ────────────────────────────────────────────────────────
+              # BƯỚC 1: Download video từ YouTube (giữ nguyên code gốc)
+              # ────────────────────────────────────────────────────────
+              print("⬇️  Đang tải video...")
+              dl_result = subprocess.run([
                   'yt-dlp',
                   '--cookies', 'cookies.txt',
+                  '--js-runtimes', 'deno',
+                  '--remote-components', 'ejs:github',
                   '--format', 'bestvideo+bestaudio/best',
                   '--merge-output-format', 'mkv',
                   '--postprocessor-args', 'ffmpeg:-c:v copy -c:a copy',
                   '--write-info-json',
                   '--output', 'video.%(ext)s',
-                  url
-              ]
-              result = subprocess.run(cmd, capture_output=False)
-              return result.returncode == 0
+                  f'https://www.youtube.com/watch?v={video_id}'
+              ])
 
-          def get_video_file():
-              """Tìm file video đã tải về"""
-              for ext in ['*.mkv', '*.mp4', '*.webm']:
-                  files = glob.glob(ext)
-                  if files:
-                      return files[0]
-              return None
+              if dl_result.returncode != 0:
+                  print(f"  ❌ Tải thất bại! Bỏ qua.")
+                  fail_count += 1
+                  with open('failed_ids.txt', 'a') as f:
+                      f.write(video_id + '\n')
+                  cleanup_video()
+                  continue
 
-          def get_title_from_info():
-              """Lấy tiêu đề từ info.json"""
+              # ────────────────────────────────────────────────────────
+              # BƯỚC 2: Kiểm tra video và audio (giữ nguyên code gốc)
+              # ────────────────────────────────────────────────────────
+              video_file = None
+              for name in ['video.mkv', 'video.mp4', 'video.webm']:
+                  if os.path.exists(name):
+                      video_file = name
+                      break
+
+              if not video_file:
+                  print("  ❌ Không tìm thấy file video sau khi tải!")
+                  fail_count += 1
+                  with open('failed_ids.txt', 'a') as f:
+                      f.write(video_id + '\n')
+                  continue
+
+              print(f"  📁 File tải về: {video_file}")
+
+              audio_check = subprocess.run([
+                  'ffprobe', '-v', 'error',
+                  '-select_streams', 'a:0',
+                  '-show_entries', 'stream=codec_name',
+                  '-of', 'default=nw=1',
+                  video_file
+              ], capture_output=True, text=True)
+
+              video_codec_check = subprocess.run([
+                  'ffprobe', '-v', 'error',
+                  '-select_streams', 'v:0',
+                  '-show_entries', 'stream=codec_name',
+                  '-of', 'default=nw=1',
+                  video_file
+              ], capture_output=True, text=True)
+
+              size_str = f"{os.path.getsize(video_file) / 1024 / 1024:.1f} MB"
+              print(f"  🎬 Codec video: {video_codec_check.stdout.strip()}")
+              print(f"  🔊 Codec audio: {audio_check.stdout.strip()}")
+              print(f"  💾 Dung lượng:  {size_str}")
+
+              if not audio_check.stdout.strip():
+                  print("  ❌ KHÔNG có audio stream! Dừng lại.")
+                  fail_count += 1
+                  with open('failed_ids.txt', 'a') as f:
+                      f.write(video_id + '\n')
+                  cleanup_video()
+                  continue
+
+              print("  ✅ OK — video và audio đều có")
+
+              # ────────────────────────────────────────────────────────
+              # BƯỚC 3: Upload lên YouTube channel (giữ nguyên code gốc)
+              # ────────────────────────────────────────────────────────
+              # Lấy tiêu đề từ info.json
+              title = 'Untitled Video'
               info_files = glob.glob('*.info.json')
               if info_files:
                   try:
                       with open(info_files[0], 'r', encoding='utf-8') as f:
-                          return json.load(f).get('title', 'Untitled Video')
+                          title = json.load(f).get('title', 'Untitled Video')
                   except:
                       pass
-              return 'Untitled Video'
+              title = (title or 'Untitled Video')[:100]
 
-          def upload_video(video_file, title):
-              """Upload video lên YouTube, trả về video_id hoặc None"""
               mime_map = {
                   '.mkv': 'video/x-matroska',
                   '.mp4': 'video/mp4',
@@ -237,14 +288,14 @@ jobs:
               }
               ext = os.path.splitext(video_file)[1].lower()
               mime = mime_map.get(ext, 'video/mp4')
-              size_mb = os.path.getsize(video_file) / 1024 / 1024
 
-              print(f"  📦 File: {video_file} ({size_mb:.1f} MB) — MIME: {mime}")
+              print(f"  📤 Đang upload: {title}")
               print(f"  🔒 Privacy: {privacy}")
+              print(f"  📦 MIME type: {mime}")
 
               body = {
                   'snippet': {
-                      'title': title[:100],
+                      'title': title,
                       'description': '',
                       'categoryId': '22'
                   },
@@ -265,65 +316,26 @@ jobs:
                   media_body=media
               )
 
+              # Upload với retry tự động (giữ nguyên code gốc)
               response = None
               retry = 0
-              while response is None:
-                  try:
-                      status, response = request.next_chunk()
-                      if status:
-                          pct = int(status.progress() * 100)
-                          print(f"  ⬆️  Tiến độ: {pct}%", end='\r')
-                      retry = 0
-                  except Exception as e:
-                      retry += 1
-                      if retry > 5:
-                          raise
-                      print(f"\n  ⚠️ Lỗi tạm thời (lần {retry}): {e} — thử lại sau 10s...")
-                      time.sleep(10)
-
-              print()
-              return response['id']
-
-          # ── Vòng lặp chính ──────────────────────────────────────────
-          success_count = 0
-          fail_count = 0
-
-          for idx, video_id in enumerate(pending, 1):
-              print(f"\n{'='*60}")
-              print(f"📹 [{idx}/{total}] Đang xử lý video ID: {video_id}")
-              print(f"{'='*60}")
-
-              cleanup_video()  # dọn dẹp trước
-
-              # ── Bước 1: Tải video ──────────────────────────────────
-              print(f"⬇️  Đang tải...")
-              ok = download_video(video_id)
-              if not ok:
-                  print(f"  ❌ Tải thất bại! Bỏ qua video này.")
-                  fail_count += 1
-                  # Ghi vào fail list để log
-                  with open('failed_ids.txt', 'a') as f:
-                      f.write(video_id + '\n')
-                  cleanup_video()
-                  continue
-
-              # ── Bước 2: Tìm file video ─────────────────────────────
-              video_file = get_video_file()
-              if not video_file:
-                  print(f"  ❌ Không tìm thấy file sau khi tải! Bỏ qua.")
-                  fail_count += 1
-                  with open('failed_ids.txt', 'a') as f:
-                      f.write(video_id + '\n')
-                  continue
-
-              title = get_title_from_info()
-              print(f"  📌 Tiêu đề: {title}")
-
-              # ── Bước 3: Upload lên YouTube ─────────────────────────
-              print(f"  📤 Đang upload lên YouTube...")
               try:
-                  new_id = upload_video(video_file, title)
-                  print(f"  ✅ Upload thành công! → https://www.youtube.com/watch?v={new_id}")
+                  while response is None:
+                      try:
+                          status, response = request.next_chunk()
+                          if status:
+                              print(f"  ⬆️  Tiến độ: {int(status.progress() * 100)}%")
+                          retry = 0
+                      except Exception as e:
+                          retry += 1
+                          if retry > 5:
+                              raise
+                          print(f"  ⚠️ Lỗi tạm thời (lần {retry}): {e} — thử lại sau 10s...")
+                          time.sleep(10)
+
+                  new_video_id = response['id']
+                  print(f"\n  ✅ Upload thành công! Video ID: {new_video_id}")
+                  print(f"  🔗 https://www.youtube.com/watch?v={new_video_id}")
                   success_count += 1
 
                   # Lưu vào danh sách đã upload
@@ -336,10 +348,11 @@ jobs:
                   with open('failed_ids.txt', 'a') as f:
                       f.write(video_id + '\n')
 
-              # ── Bước 4: Xóa file tạm ──────────────────────────────
+              # ────────────────────────────────────────────────────────
+              # BƯỚC 4: Dọn dẹp file tạm, sang video tiếp theo
+              # ────────────────────────────────────────────────────────
               cleanup_video()
 
-              # Nghỉ 5 giây giữa các video để tránh rate limit
               if idx < total:
                   print(f"  💤 Nghỉ 5 giây trước video tiếp theo...")
                   time.sleep(5)
@@ -349,8 +362,6 @@ jobs:
           print(f"🏁 HOÀN THÀNH!")
           print(f"  ✅ Thành công: {success_count}/{total}")
           print(f"  ❌ Thất bại:   {fail_count}/{total}")
-          if fail_count > 0:
-              print(f"  ⚠️  Xem file failed_ids.txt để biết video nào lỗi")
           print(f"{'='*60}")
           PYEOF
 
@@ -358,27 +369,27 @@ jobs:
       # 6. LƯU CACHE DANH SÁCH ĐÃ UPLOAD
       # ────────────────────────────────────────────────────────────
       - name: Lưu cache uploaded list
-        if: always() && ${{ github.event.inputs.skip_existing == 'true' }}
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: uploaded_ids.txt
-          key: uploaded-ids-${{ github.event.inputs.channel_url }}-${{ github.run_id }}
+          key: uploaded-ids-${{ github.run_id }}
 
       # ────────────────────────────────────────────────────────────
-      # 7. IN THỐNG KÊ CUỐI
+      # 7. THỐNG KÊ CUỐI
       # ────────────────────────────────────────────────────────────
       - name: Thống kê kết quả
         if: always()
         run: |
           echo "📊 === KẾT QUẢ CUỐI CÙNG ==="
-          echo "🔢 Tổng video trên kênh: $(wc -l < all_video_ids.txt 2>/dev/null || echo 0)"
-          echo "✅ Đã upload thành công: $(wc -l < uploaded_ids.txt 2>/dev/null || echo 0)"
-          echo "❌ Thất bại: $(wc -l < failed_ids.txt 2>/dev/null || echo 0)"
+          echo "🔢 Tổng video trên kênh : $(wc -l < all_video_ids.txt 2>/dev/null || echo 0)"
+          echo "✅ Đã upload thành công : $(wc -l < uploaded_ids.txt 2>/dev/null || echo 0)"
+          echo "❌ Thất bại             : $(wc -l < failed_ids.txt 2>/dev/null || echo 0)"
 
           if [ -f failed_ids.txt ] && [ -s failed_ids.txt ]; then
             echo ""
             echo "⚠️  Danh sách video bị lỗi:"
-            cat failed_ids.txt | while read id; do
+            while read id; do
               echo "  - https://www.youtube.com/watch?v=$id"
-            done
+            done < failed_ids.txt
           fi
